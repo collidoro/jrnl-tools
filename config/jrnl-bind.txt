@@ -1,0 +1,47 @@
+JRNL – SHORTCUTS (Agenda)
+
+TAGESANSICHT
+  jrnl today                Tagesprogramm anzeigen
+  jrnl today --edit         Tagesdatei in nvim öffnen
+
+EINTRÄGE (heute)
+  jrnl w                    Wetter (automatisch)
+  jrnl f 60M Basemiles      Training
+  jrnl e 15:00 Termin       Termin
+  jrnl t Tasktext           Task (- [ ])
+  jrnl - Notiztext          Kurznotiz (- …)
+  jrnl l Langer Text        Langer Eintrag (Paragraph)
+  jrnl r 6 f k -            Logcode (r …)
+  jrnl x Suchtext           Task per Text abhaken ([x])
+
+DATUM (YYMMDD)
+  jrnl 260111               Tagesabschnitt anzeigen
+  jrnl 260111 --edit        Tagesabschnitt editieren
+  jrnl 260111 t Tasktext    Task in Zukunft/Datum
+  jrnl 260111 e 15:00 ...   Termin in Zukunft/Datum
+  jrnl 260111 f ...         Training in Zukunft/Datum
+  jrnl 260111 - ...         Notiz in Zukunft/Datum
+  jrnl 260111 r ...         Logcode in Zukunft/Datum
+  jrnl 260111 x ...         Task abhaken in Zukunft/Datum
+
+WOCHE
+  jrnl week                 Aktuelle Woche anzeigen
+  jrnl week --edit          Wochenfile in nvim öffnen
+  jrnl week W02             Bestimmte Woche (Im Jahr)
+  jrnl week 2026-W02        Bestimmte Woche (explizit)
+  jrnl week W02 --edit      Öffnen
+  jrnl week W02 z Text      Wochenziel (Text)
+  jrnl week W02 t Text      Wochentask (- [ ] …)
+
+NOTIZEN
+  Reihenfolge im Tag:
+    w
+    f
+    e
+    t / - / l
+    r
+
+AUTOMATION
+  - Weekly-Datei:  YYYY-Www.md
+  - Rollover: offene Tasks werden übernommen
+
