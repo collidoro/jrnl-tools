@@ -1,1 +1,949 @@
-/home/mariano/.local/bin/jrnl-agenda.weekly
+#!/usr/bin/env python3
+import os
+import sys
+import re
+import datetime as dt
+
+# ============================================================
+# jrnl-agenda (weekly storage)
+# - One file per ISO week: YYYY-Www.md  (ISO year/week!)
+# - Inside the weekly file, each day is a section:
+#     #### Mo 29.12.25
+#     w <weather>
+#     f ...
+#     e ...
+#     - [ ] ...
+#     - note ...
+#     r ...
+# - Commands:
+#     today [--edit]         show/edit today's section
+#     week  [--edit]         show/edit current week file (no YAML)
+#     week z <Text>          append weekly goal (plain text)
+#     week t <Text>          append weekly task (- [ ])
+#     YYMMDD [--edit]        show/edit a past day section
+#     f|e|t|-|l|r|x <Text>    modify today's section
+#     path                   print current week file path
+# - Automation:
+#     rollover: open tasks (- [ ]) from yesterday are moved into today
+# ============================================================
+
+MONTH_NAMES = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember"
+]
+WEEKDAY_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+BASE_DIR = os.environ.get("JRNL_AGENDA_DIR", os.path.expanduser("~/Vaults/Mariano/02-Agenda"))
+EDITOR = os.environ.get("JRNL_AGENDA_EDITOR", os.environ.get("EDITOR", "nvim"))
+WEATHER_CITY = os.environ.get("JRNL_WEATHER_CITY", "Zurich")
+WEATHER_LANG = os.environ.get("JRNL_WEATHER_LANG", "de")
+
+SEP_LINE = "-------------------------------------"
+
+
+# ----------------- Weather -----------------
+
+def get_weather_string() -> str:
+    """Simple weather string from wttr.in via curl."""
+    try:
+        cmd = f"curl -s 'https://wttr.in/{WEATHER_CITY}?format=%t+%C+%p+%w&lang={WEATHER_LANG}'"
+        txt = os.popen(cmd).read().strip()
+        if not txt:
+            return ""
+
+        txt = txt.replace("mm", "%")
+        txt = txt.replace("+", "")
+        txt = txt.replace("°C", " °C")
+        txt = txt.replace("km/h", " km/h")
+        txt = re.sub(r"(\d+)\.\d+%", r"\1%", txt)
+        return txt
+    except Exception:
+        return ""
+
+
+# ----------------- IO -----------------
+
+def read_lines(path: str) -> list[str]:
+    with open(path, encoding="utf-8") as f:
+        return f.read().splitlines()
+
+def write_lines(path: str, lines: list[str]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+# ----------------- Date helpers -----------------
+
+def iso_year_week(day: dt.date) -> tuple[int, int]:
+    iso = day.isocalendar()  # year, week, weekday
+    return int(iso.year), int(iso.week)
+
+def week_file_path(day: dt.date) -> str:
+    iy, iw = iso_year_week(day)
+    return os.path.join(BASE_DIR, f"{iy}-W{iw:02d}.md")
+
+def monday_of_iso_week(iso_year: int, iso_week: int) -> dt.date:
+    return dt.date.fromisocalendar(iso_year, iso_week, 1)
+
+def day_heading(day: dt.date) -> str:
+    wd = WEEKDAY_SHORT[day.weekday()]
+    return f"#### {wd} {day.strftime('%d.%m.%y')}"
+
+
+# ----------------- YAML / sections -----------------
+
+def yaml_end_index(lines: list[str]) -> int:
+    """Index after YAML frontmatter; 0 if none."""
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return i + 1
+    return 0
+
+def find_day_section_range(lines: list[str], day: dt.date) -> tuple[int, int]:
+    heading = day_heading(day).strip()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            start = i
+            break
+    if start is None:
+        raise RuntimeError("Tages-Section nicht gefunden")
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("#### "):
+            end = j
+            break
+    return start, end
+
+def get_day_section(lines: list[str], day: dt.date) -> list[str]:
+    s, e = find_day_section_range(lines, day)
+    return lines[s:e]
+
+def set_day_section(lines: list[str], day: dt.date, section: list[str]) -> list[str]:
+    s, e = find_day_section_range(lines, day)
+    return lines[:s] + section + lines[e:]
+
+
+# ----------------- Week file scaffolding -----------------
+
+def build_day_template(day: dt.date) -> list[str]:
+    return [
+        day_heading(day),
+        "",
+        "w ",
+        "",
+        "r ",
+        "",
+        "",
+    ]
+
+def ensure_week_file(day: dt.date) -> str:
+    """Create weekly file if missing. Ensure all 7 day sections exist."""
+    os.makedirs(BASE_DIR, exist_ok=True)
+    path = week_file_path(day)
+    iy, iw = iso_year_week(day)
+
+    if os.path.exists(path):
+        lines = read_lines(path)
+        for weekday in range(1, 8):
+            d = dt.date.fromisocalendar(iy, iw, weekday)
+            h = day_heading(d).strip()
+            if not any(line.strip() == h for line in lines):
+                lines += build_day_template(d)
+        write_lines(path, lines)
+        return path
+
+    monday = monday_of_iso_week(iy, iw)
+    month_name = MONTH_NAMES[monday.month - 1]
+
+    yaml = [
+        "---",
+        f"Monat: {month_name}",
+        f"Alias: W{iw:02d}",
+        "Tags: agenda/logbuch",
+        "cssclasses:",
+        "  - journal",
+        f"Jahr: \"{iy}\"",
+        f"Kalenderwoche: \"{iw:02d}\"",
+        "---",
+        "",
+    ]
+
+    body = [
+        f"[M{monday.month:02d}](Agenda/{monday.year}-{monday.month:02d}.md)",
+        "",
+        f"### W{iw:02d}",
+        "",  # exactly one blank line after week marker
+    ]
+
+    for weekday in range(1, 8):
+        d = dt.date.fromisocalendar(iy, iw, weekday)
+        body += build_day_template(d)
+
+    write_lines(path, yaml + body)
+    return path
+
+
+# ----------------- Normalize / weather -----------------
+
+def normalize_day_section(section: list[str]) -> list[str]:
+    """Ensure: w exists, single r at end, and trailing blank lines."""
+    if not section:
+        raise RuntimeError("Leere Section")
+    heading = section[0]
+    body = section[1:]
+
+    while body and body[-1].strip() == "":
+        body.pop()
+
+    # ensure w exists
+    if not any(l.lstrip().startswith("w") for l in body):
+        if not body or body[0].strip() != "":
+            body.insert(0, "")
+        body.insert(1, "w ")
+        body.insert(2, "")
+
+    # keep only one r, last
+    r_idxs = [i for i, l in enumerate(body) if l.lstrip().startswith("r")]
+    if not r_idxs:
+        if body and body[-1].strip() != "":
+            body.append("")
+        body.append("r ")
+    else:
+        last = r_idxs[-1]
+        last_line = body[last]
+        for idx in reversed(r_idxs[:-1]):
+            body.pop(idx)
+            if idx < last:
+                last -= 1
+        body.pop(last)
+        if body and body[-1].strip() != "":
+            body.append("")
+        body.append(last_line)
+
+    # --- NEW: reduce extra blank lines right before r (keep max 1) ---
+    if body and body[-1].lstrip().startswith("r"):
+        while len(body) >= 3 and body[-2].strip() == "" and body[-3].strip() == "":
+            body.pop(-3)
+        # ensure at least one blank before r if there is content above
+        if len(body) >= 2 and body[-2].strip() != "":
+            body.insert(-1, "")
+
+    return [heading] + body + ["", ""]
+
+def fill_weather_if_blank(section: list[str]) -> list[str]:
+    """If the first w line is empty (just 'w'), fill it."""
+    heading = section[0]
+    body = section[1:]
+
+    for i, l in enumerate(body):
+        s = l.strip()
+        if s == "w":
+            weather = get_weather_string()
+            if weather:
+                body[i] = f"w {weather}"
+            break
+        if s.startswith("w "):
+            break
+
+    return [heading] + body
+
+
+# ----------------- Day insert helpers -----------------
+
+def find_indices(lines: list[str], predicate):
+    return [i for i, line in enumerate(lines) if predicate(line)]
+
+def _r_index(lines: list[str]) -> int:
+    return next((i for i, l in enumerate(lines) if l.lstrip().startswith("r")), len(lines))
+
+def handle_f(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    new_line = f"f {text}"
+
+    w_idx = next((i for i, l in enumerate(lines) if l.lstrip().startswith("w")), None)
+    f_idxs = find_indices(lines, lambda l: l.lstrip().startswith("f"))
+    r_idx = _r_index(lines)
+
+    if f_idxs:
+        insert_at = f_idxs[-1] + 1
+    elif w_idx is not None:
+        after_w = w_idx + 1
+        if after_w >= len(lines) or lines[after_w].strip() != "":
+            lines.insert(after_w, "")
+        r_idx = _r_index(lines)
+        insert_at = after_w + 1
+        while insert_at < r_idx and lines[insert_at].strip() == "":
+            insert_at += 1
+    else:
+        insert_at = r_idx
+
+    insert_at = min(insert_at, r_idx)
+    lines.insert(insert_at, new_line)
+    return [heading] + lines
+
+def handle_e(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    new_line = f"e {text}"
+
+    f_idxs = find_indices(lines, lambda l: l.lstrip().startswith("f"))
+    e_idxs = find_indices(lines, lambda l: l.lstrip().startswith("e"))
+    r_idx = _r_index(lines)
+
+    if e_idxs:
+        insert_at = e_idxs[-1] + 1
+    elif f_idxs:
+        insert_at = f_idxs[-1] + 1
+    else:
+        w_idx = next((i for i, l in enumerate(lines) if l.lstrip().startswith("w")), None)
+        insert_at = (w_idx + 1) if w_idx is not None else r_idx
+
+    insert_at = min(insert_at, r_idx)
+    lines.insert(insert_at, new_line)
+    return [heading] + lines
+
+def handle_t(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    new_line = f"- [ ] {text}"
+
+    r_idx = _r_index(lines)
+    task_idxs = find_indices(lines, lambda l: l.lstrip().startswith("- ["))
+
+    if task_idxs:
+        insert_at = min(task_idxs[-1] + 1, r_idx)
+    else:
+        f_last = max(find_indices(lines, lambda l: l.lstrip().startswith("f")), default=None)
+        e_last = max(find_indices(lines, lambda l: l.lstrip().startswith("e")), default=None)
+
+        if f_last is not None or e_last is not None:
+            base = max(x for x in [f_last, e_last] if x is not None) + 1
+        else:
+            w_idx = next((i for i, l in enumerate(lines) if l.lstrip().startswith("w")), None)
+            base = (w_idx + 1) if w_idx is not None else r_idx
+
+        insert_at = min(base, r_idx)
+
+        if insert_at > 0 and lines[insert_at - 1].strip() != "":
+            lines.insert(insert_at, "")
+            insert_at += 1
+            r_idx = _r_index(lines)
+            insert_at = min(insert_at, r_idx)
+
+    lines.insert(insert_at, new_line)
+    return [heading] + lines
+
+def handle_note(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    new_line = f"- {text}"
+
+    r_idx = _r_index(lines)
+    task_idxs = [i for i, l in enumerate(lines) if l.lstrip().startswith("- [")]
+    note_idxs = [i for i, l in enumerate(lines) if l.lstrip().startswith("- ") and not l.lstrip().startswith("- [")]
+    task_last = max(task_idxs) if task_idxs else None
+
+    if note_idxs:
+        insert_at = note_idxs[-1] + 1
+    else:
+        insert_at = (task_last + 1) if task_last is not None else r_idx
+        if insert_at > 0 and lines[insert_at - 1].strip() != "":
+            lines.insert(insert_at, "")
+            insert_at += 1
+            r_idx = _r_index(lines)
+
+    insert_at = min(insert_at, r_idx)
+    lines.insert(insert_at, new_line)
+    return [heading] + lines
+
+def handle_long(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    r_idx = _r_index(lines)
+
+    if r_idx > 0 and lines[r_idx - 1].strip() != "":
+        lines.insert(r_idx, "")
+        r_idx += 1
+
+    lines.insert(r_idx, text)
+    return [heading] + lines
+
+def handle_r(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    new_line = f"r {text}"
+
+    r_idxs = find_indices(lines, lambda l: l.lstrip().startswith("r"))
+    for idx in reversed(r_idxs):
+        del lines[idx]
+
+    if lines and lines[-1].strip() != "":
+        lines.append("")
+    lines.append(new_line)
+    return [heading] + lines
+
+def handle_x(section: list[str], text: str) -> list[str]:
+    heading = section[0]
+    lines = section[1:]
+    pat = text.lower()
+
+    for i, line in enumerate(lines):
+        if line.startswith("- [ ]") and pat in line.lower():
+            lines[i] = line.replace("- [ ]", "- [x]", 1)
+            break
+    return [heading] + lines
+
+
+# ----------------- Weekly meta (goals/tasks under ### Wxx) -----------------
+
+def week_meta_indices(lines: list[str], day: dt.date) -> tuple[int, int]:
+    iy, iw = iso_year_week(day)
+    marker = f"### W{iw:02d}"
+
+    w_idx = None
+    for i, l in enumerate(lines):
+        if l.strip() == marker:
+            w_idx = i
+            break
+    if w_idx is None:
+        raise RuntimeError("Wochen-Header (### Wxx) nicht gefunden.")
+
+    first_day = None
+    for j in range(w_idx + 1, len(lines)):
+        if lines[j].startswith("#### "):
+            first_day = j
+            break
+    if first_day is None:
+        first_day = len(lines)
+
+    return w_idx, first_day
+
+def normalize_week_meta(lines: list[str], day: dt.date, add_goal: str | None = None, add_task: str | None = None) -> list[str]:
+    w_idx, first_day = week_meta_indices(lines, day)
+    meta = lines[w_idx + 1:first_day]
+
+    while meta and meta[0].strip() == "":
+        meta.pop(0)
+    while meta and meta[-1].strip() == "":
+        meta.pop()
+
+    first_task = None
+    for i, l in enumerate(meta):
+        if l.lstrip().startswith("- ["):
+            first_task = i
+            break
+
+    if first_task is None:
+        goals = meta[:]
+        tasks = []
+    else:
+        goals = meta[:first_task]
+        tasks = meta[first_task:]
+        while goals and goals[-1].strip() == "":
+            goals.pop()
+        while tasks and tasks[0].strip() == "":
+            tasks.pop(0)
+
+    while goals and goals[0].strip() == "":
+        goals.pop(0)
+
+    if add_goal:
+        goals.append(add_goal)
+    if add_task:
+        tasks.append(f"- [ ] {add_task}")
+
+    out: list[str] = [""]  # exactly one blank after ### Wxx
+    if goals:
+        out += goals
+    if goals and tasks:
+        out.append("")
+    if tasks:
+        out += tasks
+    if not out or out[-1].strip() != "":
+        out.append("")
+
+    compact: list[str] = []
+    for l in out:
+        if l.strip() == "" and compact and compact[-1].strip() == "":
+            continue
+        compact.append(l)
+
+    return lines[:w_idx + 1] + compact + lines[first_day:]
+
+
+# ----------------- Rollover (yesterday -> today) -----------------
+
+def rollover_open_tasks(today: dt.date) -> None:
+    """
+    Rollover offene Tasks (- [ ]) aus dem zuletzt vorhandenen Tag mit offenen Tasks
+    (bis LOOKBACK Tage zurück) in den heutigen Tag.
+
+    - Quelle-Tasks werden im Quell-Tag gelöscht
+    - Im Ziel-Tag werden sie nur hinzugefügt, wenn noch nicht vorhanden (dedupe)
+    - +N Zähler wird um die Anzahl Tage seit Quell-Tag erhöht
+    """
+    LOOKBACK = int(os.environ.get("JRNL_ROLLOVER_LOOKBACK", "60"))
+
+    def has_open_tasks(sec: list[str]) -> bool:
+        for l in sec[1:]:
+            if l.lstrip().startswith("- [ ]"):
+                return True
+        return False
+
+    def today_has_task(sec: list[str], text: str) -> bool:
+        target = f"- [ ] {text}".strip()
+        for l in sec[1:]:
+            if l.strip() == target:
+                return True
+        return False
+
+    # Ziel (heute) sicherstellen
+    today_path = ensure_week_file(today)
+
+    # 1) Quell-Tag suchen: letzter Tag < today mit offenen Tasks
+    src_day = None
+    src_path = None
+
+    for back in range(1, LOOKBACK + 1):
+        d = today - dt.timedelta(days=back)
+        p = week_file_path(d)
+        if not os.path.exists(p):
+            continue
+        try:
+            lines = read_lines(p)
+            sec = get_day_section(lines, d)
+        except Exception:
+            continue
+        if has_open_tasks(sec):
+            src_day = d
+            src_path = p
+            break
+
+    if src_day is None or src_path is None:
+        return
+
+    gap_days = (today - src_day).days
+    if gap_days <= 0:
+        return
+
+    # 2) Tasks aus src_day extrahieren + src_day bereinigen
+    def extract_rollover(sec: list[str]) -> tuple[list[str], list[str], bool]:
+        """returns (rollover_texts, new_body, moved)"""
+        rollover_texts: list[str] = []
+        new_body: list[str] = []
+        moved = False
+
+        for line in sec[1:]:
+            stripped = line.lstrip()
+            if stripped.startswith("- [ ]"):
+                raw = stripped[5:].strip()
+                m = re.search(r"^(.*)\s\+(\d+)$", raw)
+                if m:
+                    base = m.group(1).rstrip()
+                    cnt = int(m.group(2)) + gap_days
+                else:
+                    base = raw
+                    cnt = gap_days
+                rollover_texts.append(f"{base} +{cnt}")
+                moved = True
+                continue
+            new_body.append(line)
+
+        return rollover_texts, new_body, moved
+
+    # ------------------------------------------------------------
+    # FALL A: Quelle und Ziel liegen in derselben Wochen-Datei
+    # ------------------------------------------------------------
+    if src_path == today_path:
+        lines = read_lines(today_path)
+        try:
+            src_sec = get_day_section(lines, src_day)
+            today_sec = get_day_section(lines, today)
+        except Exception:
+            return
+
+        rollover_texts, new_src_body, moved = extract_rollover(src_sec)
+        if not moved:
+            return
+
+        # Quelle aktualisieren (Tasks entfernt)
+        src_sec = normalize_day_section([src_sec[0]] + new_src_body)
+        lines = set_day_section(lines, src_day, src_sec)
+
+        # Ziel aktualisieren (Tasks hinzufügen, dedupe)
+        for t in rollover_texts:
+            if not today_has_task(today_sec, t):
+                today_sec = handle_t(today_sec, t)
+
+        today_sec = normalize_day_section(today_sec)
+        lines = set_day_section(lines, today, today_sec)
+
+        write_lines(today_path, lines)
+        return
+
+    # ------------------------------------------------------------
+    # FALL B: Quelle und Ziel liegen in unterschiedlichen Dateien
+    # ------------------------------------------------------------
+    src_lines = read_lines(src_path)
+    today_lines = read_lines(today_path)
+
+    try:
+        src_sec = get_day_section(src_lines, src_day)
+        today_sec = get_day_section(today_lines, today)
+    except Exception:
+        return
+
+    rollover_texts, new_src_body, moved = extract_rollover(src_sec)
+    if not moved:
+        return
+
+    # Quelle schreiben (Tasks entfernt)
+    src_sec = normalize_day_section([src_sec[0]] + new_src_body)
+    src_lines = set_day_section(src_lines, src_day, src_sec)
+    write_lines(src_path, src_lines)
+
+    # Ziel schreiben (Tasks hinzugefügt)
+    for t in rollover_texts:
+        if not today_has_task(today_sec, t):
+            today_sec = handle_t(today_sec, t)
+
+    today_sec = normalize_day_section(today_sec)
+    today_lines = set_day_section(today_lines, today, today_sec)
+    write_lines(today_path, today_lines)
+
+
+# ----------------- Public ops -----------------
+
+def ensure_today_ready(today: dt.date) -> tuple[str, list[str]]:
+    path = ensure_week_file(today)
+    rollover_open_tasks(today)
+
+    lines = read_lines(path)
+    sec = get_day_section(lines, today)
+    sec = normalize_day_section(sec)
+    sec = fill_weather_if_blank(sec)
+    sec = normalize_day_section(sec)
+
+    lines = set_day_section(lines, today, sec)
+    write_lines(path, lines)
+    return path, lines
+
+def print_day(lines: list[str], day: dt.date) -> None:
+    print("")
+    sec = get_day_section(lines, day)
+    if not sec:
+        return
+
+    # 1) Headerzeile im CLI ohne "#### "
+    h = sec[0].rstrip("\n")
+    if h.startswith("#### "):
+        h = h[5:]
+    print(h)
+
+    # 2) Rest exakt wie bisher
+    for l in sec[1:]:
+        print(l)
+
+def print_week(lines: list[str], day: dt.date) -> None:
+    i = yaml_end_index(lines)
+    body = lines[i:]
+    
+    print("")
+
+    # Header/meta bis zum ersten Tages-Header ausgeben
+    first_day_idx = None
+    for j, l in enumerate(body):
+        if l.startswith("#### "):
+            first_day_idx = j
+            break
+
+    if first_day_idx is None:
+        for l in body:
+            print(l)
+        return
+
+    header = body[:first_day_idx]
+
+    month_tok = None
+    week_tok = None
+
+    for l in header:
+        s = l.strip()
+
+        m = re.match(r"^\[([Mm]\d{2})\]\(", s)
+        if m:
+            month_tok = m.group(1).upper()
+            continue
+
+        m = re.match(r"^###\s*(W\d{2})$", s)
+        if m:
+            week_tok = m.group(1).upper()
+            continue
+
+    if month_tok and week_tok:
+        # Rest vom Header behalten (Goals/Week-Tasks), aber Monatslink + "### Wxx" ausblenden
+        filtered: list[str] = []
+        for l in header:
+            s = l.strip()
+            if re.match(r"^\[([Mm]\d{2})\]\(", s):
+                continue
+            if re.match(r"^###\s*W\d{2}\s*$", s):
+                continue
+            filtered.append(l)
+
+        # führende Leerzeilen entfernen
+        while filtered and filtered[0].strip() == "":
+            filtered.pop(0)
+
+        print(f"{month_tok} {week_tok}")
+        print("")
+
+        for l in filtered:
+            print(l)
+
+        # genau 1 Leerzeile vor den Tagen
+        if not filtered or filtered[-1].strip() != "":
+            print("")
+    else:
+        for l in header:
+            print(l)
+        print("")
+
+
+    iy, iw = iso_year_week(day)
+
+    for weekday in range(1, 8):
+        d = dt.date.fromisocalendar(iy, iw, weekday)
+        sec = get_day_section(lines, d)
+
+        # Heading im CLI ohne "#### "
+        heading_cli = sec[0].strip()
+        if heading_cli.startswith("#### "):
+            heading_cli = heading_cli[5:]
+
+        rest = sec[1:]
+
+        # Prüfen, ob es "echten" Inhalt gibt (nicht nur leeres w/r)
+        meaningful = False
+        for l in rest:
+            s = l.strip()
+            if not s:
+                continue
+            if s in ("w", "r"):
+                continue
+            meaningful = True
+            break
+
+        # Tageszeile
+        print(heading_cli)
+        print(SEP_LINE)
+
+        if meaningful:
+            # Inhalte drucken, aber leere "w" / "r" weglassen
+            tmp = sec[1:]
+            while tmp and tmp[-1].strip() == "":
+                tmp.pop()
+            for l in tmp:
+                st = l.strip()
+                if st in ("w", "r"):
+                    continue
+                print(l)
+
+        # Abstand UNTERHALB des Tages
+        print("")  # Leerzeile nach Separator
+
+def open_in_editor(path: str, search: str | None = None) -> None:
+    args = [EDITOR]
+    if search:
+        args.append(f"+/{search}")
+    args.append(path)
+    os.execvp(args[0], args)
+
+def parse_yymmdd(token: str) -> dt.date:
+    if not re.fullmatch(r"\d{6}", token):
+        raise ValueError
+    y2 = int(token[:2]); m = int(token[2:4]); d = int(token[4:6])
+    return dt.date(2000 + y2, m, d)
+
+
+# ----------------- main -----------------
+
+def die(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        die("Usage: jrnl-agenda [today|week|path|YYMMDD|f|e|t|-|l|r|x] ...", 1)
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+    today = dt.date.today()
+
+    if cmd in ("today", "show"):
+        if args[:1] == ["--edit"]:
+            path, _ = ensure_today_ready(today)
+            open_in_editor(path, day_heading(today))
+        path, lines = ensure_today_ready(today)
+        print_day(lines, today)
+        return
+
+    if cmd == "week":
+        # Optionaler Week-Selector: W02 oder 2026-W02
+        ref_day = today
+        if args:
+            a0 = args[0]
+
+            m = re.fullmatch(r"[Ww](\d{1,2})", a0)
+            m2 = re.fullmatch(r"(\d{4})-W(\d{1,2})", a0)
+
+            if m or m2:
+                if m2:
+                    y = int(m2.group(1))
+                    w = int(m2.group(2))
+                else:
+                    # Jahr heuristisch: wenn Weeknummer "zurück" wäre -> nächstes ISO-Jahr
+                    _, tw = iso_year_week(today)
+                    y, _ = iso_year_week(today)
+                    w = int(m.group(1))
+                    if w < tw:
+                        y += 1
+
+                # Montag dieser ISO-Woche als Referenzdatum
+                ref_day = dt.date.fromisocalendar(y, w, 1)
+                args = args[1:]
+
+        if args[:1] == ["--edit"]:
+            path = ensure_week_file(ref_day)
+            _, iw = iso_year_week(ref_day)
+            open_in_editor(path, f"### W{iw:02d}")
+            return
+
+        if args:
+            sub = args[0]
+            rest = " ".join(args[1:]).strip()
+            path = ensure_week_file(ref_day)
+            lines = read_lines(path)
+
+            if sub == "z":
+                if not rest:
+                    die("Bitte Text für Wochenziel angeben (jrnl week [Wxx|YYYY-Wxx] z <Text>)", 2)
+                lines = normalize_week_meta(lines, ref_day, add_goal=rest)
+                write_lines(path, lines)
+                print(path)
+                return
+
+            if sub == "t":
+                if not rest:
+                    die("Bitte Tasktext angeben (jrnl week [Wxx|YYYY-Wxx] t <Text>)", 2)
+                lines = normalize_week_meta(lines, ref_day, add_task=rest)
+                write_lines(path, lines)
+                print(path)
+                return
+
+            die("Unbekannter week-Unterbefehl (erlaubt: z, t, --edit)", 2)
+
+        path = ensure_week_file(ref_day)
+        lines = read_lines(path)
+        print_week(lines, ref_day)
+        return
+
+
+    if cmd == "path":
+        print(ensure_week_file(today))
+        return
+
+    if re.fullmatch(r"\d{6}", cmd):
+        day = parse_yymmdd(cmd)
+
+        # Week-Datei ggf. erzeugen + Tagessection sicherstellen
+        path = ensure_week_file(day)
+        lines = read_lines(path)
+
+        try:
+            sec = get_day_section(lines, day)
+        except Exception:
+            die(
+                f"Kein Tages-Abschnitt für {day.strftime('%d.%m.%y')} in {os.path.basename(path)}",
+                1,
+            )
+
+        # YYMMDD --edit
+        if args[:1] == ["--edit"]:
+            open_in_editor(path, day_heading(day))
+            return
+
+        # YYMMDD <mode> <text...>
+        if args and args[0] in ("f", "e", "t", "-", "l", "r", "x"):
+            mode = args[0]
+            text = " ".join(args[1:]).strip()
+            if not text:
+                die(f"Bitte Text angeben (jrnl {cmd} {mode} <Text>)", 2)
+
+            if mode == "f":
+                sec = handle_f(sec, text)
+            elif mode == "e":
+                sec = handle_e(sec, text)
+            elif mode == "t":
+                sec = handle_t(sec, text)
+            elif mode == "-":
+                sec = handle_note(sec, text)
+            elif mode == "l":
+                sec = handle_long(sec, text)
+            elif mode == "r":
+                sec = handle_r(sec, text)
+            elif mode == "x":
+                sec = handle_x(sec, text)
+
+            sec = normalize_day_section(sec)
+            lines = set_day_section(lines, day, sec)
+            write_lines(path, lines)
+            print(path)
+            return
+
+        # sonst: nur anzeigen
+        print_day(lines, day)
+        return
+
+
+    if cmd in ("f", "e", "t", "-", "l", "r", "x"):
+        text = " ".join(args).strip()
+        if not text:
+            die(f"Bitte Text angeben (jrnl {cmd} <Text>)", 2)
+
+        path, lines = ensure_today_ready(today)
+        sec = get_day_section(lines, today)
+
+        if cmd == "f":
+            sec = handle_f(sec, text)
+        elif cmd == "e":
+            sec = handle_e(sec, text)
+        elif cmd == "t":
+            sec = handle_t(sec, text)
+        elif cmd == "-":
+            sec = handle_note(sec, text)
+        elif cmd == "l":
+            sec = handle_long(sec, text)
+        elif cmd == "r":
+            sec = handle_r(sec, text)
+        elif cmd == "x":
+            sec = handle_x(sec, text)
+
+        sec = normalize_day_section(sec)
+        lines = set_day_section(lines, today, sec)
+        write_lines(path, lines)
+        print(path)
+        return
+
+    die("Unbekannter Befehl", 2)
+
+
+if __name__ == "__main__":
+    main()
+
