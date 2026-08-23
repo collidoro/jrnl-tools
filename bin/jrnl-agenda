@@ -3,8 +3,11 @@ import os
 import sys
 import re
 import datetime as dt
+import json
+import subprocess
+import textwrap
 
-# ============================================================
+# ==============================================
 # jrnl-agenda (weekly storage)
 # - One file per ISO week: YYYY-Www.md  (ISO year/week!)
 # - Inside the weekly file, each day is a section:
@@ -38,28 +41,75 @@ EDITOR = os.environ.get("JRNL_AGENDA_EDITOR", os.environ.get("EDITOR", "nvim"))
 WEATHER_CITY = os.environ.get("JRNL_WEATHER_CITY", "Zurich")
 WEATHER_LANG = os.environ.get("JRNL_WEATHER_LANG", "de")
 
-SEP_LINE = "-------------------------------------"
+SEP_LINE = "--------------------------------------------"
 
 
 # ----------------- Weather -----------------
 
 def get_weather_string() -> str:
-    """Simple weather string from wttr.in via curl."""
+    """Wetter für Zürich via Open-Meteo."""
     try:
-        cmd = f"curl -s 'https://wttr.in/{WEATHER_CITY}?format=%t+%C+%p+%w&lang={WEATHER_LANG}'"
-        txt = os.popen(cmd).read().strip()
-        if not txt:
-            return ""
+        cmd = (
+            "curl -s "
+            "'https://api.open-meteo.com/v1/forecast"
+            "?latitude=47.3769"
+            "&longitude=8.5417"
+            "&current=weather_code,wind_speed_10m,wind_direction_10m"
+            "&daily=temperature_2m_max,precipitation_probability_max"
+            "&timezone=Europe%2FZurich"
+            "&forecast_days=1'"
+        )
 
-        txt = txt.replace("mm", "%")
-        txt = txt.replace("+", "")
-        txt = txt.replace("°C", " °C")
-        txt = txt.replace("km/h", " km/h")
-        txt = re.sub(r"(\d+)\.\d+%", r"\1%", txt)
-        return txt
+        raw = subprocess.check_output(cmd, shell=True, text=True)
+        data = json.loads(raw)
+
+        current = data["current"]
+        daily = data["daily"]
+
+        # Tageshöchsttemperatur
+        temp = round(daily["temperature_2m_max"][0])
+
+        # Niederschlagswahrscheinlichkeit
+        rain = round(daily["precipitation_probability_max"][0] or 0)
+
+        # Wind
+        wind_speed = round(current["wind_speed_10m"])
+        wind_deg = current["wind_direction_10m"]
+
+        # Windrichtung als Pfeil
+        arrows = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
+        wind_arrow = arrows[round(wind_deg / 45) % 8]
+
+        # Open-Meteo Weather Codes
+        code = current["weather_code"]
+
+        if code == 0:
+            condition = "Sonnig"
+        elif code in (1, 2):
+            condition = "Leicht bewölkt"
+        elif code == 3:
+            condition = "Bewölkt"
+        elif code in (45, 48):
+            condition = "Nebel"
+        elif code in (51, 53, 55, 56, 57):
+            condition = "Nieselregen"
+        elif code in (61, 63, 65, 66, 67):
+            condition = "Regen"
+        elif code in (71, 73, 75, 77):
+            condition = "Schnee"
+        elif code in (80, 81, 82):
+            condition = "Schauer"
+        elif code in (85, 86):
+            condition = "Schneeschauer"
+        elif code in (95, 96, 99):
+            condition = "Gewitter"
+        else:
+            condition = "Unbekannt"
+
+        return f"{temp:02d} °C {condition} {rain}% {wind_arrow}{wind_speed} km/h"
+
     except Exception:
         return ""
-
 
 # ----------------- IO -----------------
 
@@ -67,11 +117,11 @@ def read_lines(path: str) -> list[str]:
     with open(path, encoding="utf-8") as f:
         return f.read().splitlines()
 
+
 def write_lines(path: str, lines: list[str]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
-
 
 # ----------------- Date helpers -----------------
 
@@ -225,6 +275,36 @@ def normalize_day_section(section: list[str]) -> list[str]:
             body.append("")
         body.append(last_line)
 
+    # --- Tasks sortieren: offen nach Verzögerung, erledigte danach ---
+    task_idxs = [
+        i for i, l in enumerate(body)
+        if l.lstrip().startswith("- [ ]")
+        or l.lstrip().startswith("- [x]")
+    ]
+
+    def task_sort_key(line: str):
+        s = line.lstrip()
+
+        # Verzögerung am Zeilenende, z.B. +12
+        m = re.search(r"\+(\d+)\s*$", s)
+        delay = int(m.group(1)) if m else 0
+
+        # offene Tasks zuerst, höchste Verzögerung zuerst
+        if s.startswith("- [ ]"):
+            return (0, -delay)
+
+        # erledigte Tasks danach; bestehende Reihenfolge bleibt erhalten
+        return (1, 0)
+
+    sorted_tasks = sorted(
+        (body[i] for i in task_idxs),
+        key=task_sort_key,
+    )
+
+    for idx, task in zip(task_idxs, sorted_tasks):
+        body[idx] = task
+
+
     # --- NEW: reduce extra blank lines right before r (keep max 1) ---
     if body and body[-1].lstrip().startswith("r"):
         while len(body) >= 3 and body[-2].strip() == "" and body[-3].strip() == "":
@@ -292,19 +372,52 @@ def handle_e(section: list[str], text: str) -> list[str]:
     lines = section[1:]
     new_line = f"e {text}"
 
-    f_idxs = find_indices(lines, lambda l: l.lstrip().startswith("f"))
-    e_idxs = find_indices(lines, lambda l: l.lstrip().startswith("e"))
-    r_idx = _r_index(lines)
+    def event_time(line: str):
+        m = re.match(r"^\s*e\s+(\d{1,2}):(\d{2})\b", line)
+        if not m:
+            return None
+        return int(m.group(1)) * 60 + int(m.group(2))
 
+    # Neue Uhrzeit ermitteln
+    new_time = event_time(new_line)
+
+    # vorhandene Event-Zeilen
+    e_idxs = find_indices(
+        lines,
+        lambda l: l.lstrip().startswith("e ")
+    )
+
+    # Wenn eine gültige Uhrzeit vorhanden ist:
+    # chronologisch zwischen bestehende Events einsortieren.
+    if new_time is not None:
+        for idx in e_idxs:
+            existing_time = event_time(lines[idx])
+
+            if existing_time is not None and new_time < existing_time:
+                lines.insert(idx, new_line)
+                return [heading] + lines
+
+    # Falls später als alle bestehenden Events:
     if e_idxs:
-        insert_at = e_idxs[-1] + 1
-    elif f_idxs:
+        lines.insert(e_idxs[-1] + 1, new_line)
+        return [heading] + lines
+
+    # Noch kein Event vorhanden:
+    f_idxs = find_indices(
+        lines,
+        lambda l: l.lstrip().startswith("f ")
+    )
+
+    if f_idxs:
         insert_at = f_idxs[-1] + 1
     else:
-        w_idx = next((i for i, l in enumerate(lines) if l.lstrip().startswith("w")), None)
-        insert_at = (w_idx + 1) if w_idx is not None else r_idx
+        w_idx = next(
+            (i for i, l in enumerate(lines)
+             if l.lstrip().startswith("w")),
+            None
+        )
+        insert_at = w_idx + 1 if w_idx is not None else 0
 
-    insert_at = min(insert_at, r_idx)
     lines.insert(insert_at, new_line)
     return [heading] + lines
 
@@ -634,6 +747,52 @@ def ensure_today_ready(today: dt.date) -> tuple[str, list[str]]:
     write_lines(path, lines)
     return path, lines
 
+def highlight_today(text: str, day: dt.date) -> str:
+    if day == dt.date.today():
+        return f"\033[7m{text}\033[0m"
+    return text
+
+def wrap_cli_line(line: str, width: int = 40) -> list[str]:
+    if not line.strip():
+        return [""]
+
+    # Markdown-Listen sauber einrücken
+    if line.startswith("- "):
+        return textwrap.wrap(
+            line,
+            width=width,
+            subsequent_indent="  ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+
+    return textwrap.wrap(
+        line,
+        width=width,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+def color_overdue_task(line: str) -> str:
+    s = line.lstrip()
+
+    if not s.startswith("- [ ]"):
+        return line
+
+    m = re.search(r"\+(\d+)\s*$", s)
+    if not m:
+        return line
+
+    delay = int(m.group(1))
+
+    if delay >= 9:
+        return f"\033[38;5;197m{line}\033[0m"
+    elif delay >= 6:
+        return f"\033[38;5;205m{line}\033[0m"
+    elif delay >= 3:
+        return f"\033[38;5;218m{line}\033[0m"
+    return line
+
 def print_day(lines: list[str], day: dt.date) -> None:
     print("")
     sec = get_day_section(lines, day)
@@ -644,11 +803,12 @@ def print_day(lines: list[str], day: dt.date) -> None:
     h = sec[0].rstrip("\n")
     if h.startswith("#### "):
         h = h[5:]
-    print(h)
+    print(highlight_today(h, day))
 
     # 2) Rest exakt wie bisher
     for l in sec[1:]:
-        print(l)
+      for wrapped in wrap_cli_line(l):
+        print(color_overdue_task(wrapped))
 
 def print_week(lines: list[str], day: dt.date) -> None:
     i = yaml_end_index(lines)
@@ -741,7 +901,7 @@ def print_week(lines: list[str], day: dt.date) -> None:
             break
 
         # Tageszeile
-        print(heading_cli)
+        print(highlight_today(heading_cli, d))
         print(SEP_LINE)
 
         if meaningful:
@@ -753,7 +913,9 @@ def print_week(lines: list[str], day: dt.date) -> None:
                 st = l.strip()
                 if st in ("w", "r"):
                     continue
-                print(l)
+
+                for wrapped in wrap_cli_line(l, width=43):
+                  print(wrapped)
 
         # Abstand UNTERHALB des Tages
         print("")  # Leerzeile nach Separator
@@ -808,12 +970,14 @@ def main() -> None:
                     y = int(m2.group(1))
                     w = int(m2.group(2))
                 else:
-                    # Jahr heuristisch: wenn Weeknummer "zurück" wäre -> nächstes ISO-Jahr
-                    _, tw = iso_year_week(today)
-                    y, _ = iso_year_week(today)
+                    # Jahr-Heuristik (gewünscht):
+                    # - wenn Zielwoche <= aktuelle Woche -> aktuelles ISO-Jahr
+                    # - wenn Zielwoche >  aktuelle Woche -> Vorjahr
+                    iso_y, iso_w = iso_year_week(today)
                     w = int(m.group(1))
-                    if w < tw:
-                        y += 1
+                    y = iso_y
+                    if w > iso_w:
+                        y = iso_y - 1
 
                 # Montag dieser ISO-Woche als Referenzdatum
                 ref_day = dt.date.fromisocalendar(y, w, 1)
