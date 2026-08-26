@@ -6,6 +6,8 @@ import datetime as dt
 import json
 import subprocess
 import textwrap
+import importlib.util
+from pathlib import Path
 
 # ==============================================
 # jrnl-agenda (weekly storage)
@@ -29,6 +31,38 @@ import textwrap
 # - Automation:
 #     rollover: open tasks (- [ ]) from yesterday are moved into today
 # ============================================================
+
+# jrnl Plug-In ----------------------------------------------
+
+PLUGIN_DIR = Path.home() / ".config" / "jrnl" / "plugins"
+
+
+def load_plugins():
+    plugins = {}
+
+    if not PLUGIN_DIR.exists():
+        return plugins
+
+    for path in PLUGIN_DIR.glob("*.py"):
+        if path.name.startswith("_"):
+            continue
+
+        try:
+            spec = importlib.util.spec_from_file_location(path.stem, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            plugins[path.stem] = module
+
+        except Exception as e:
+            print(f"Plugin '{path.stem}' konnte nicht geladen werden: {e}")
+
+    return plugins
+
+
+PLUGINS = load_plugins()
+
+
+# ----------------------------------------------------------
 
 MONTH_NAMES = [
     "Januar", "Februar", "März", "April", "Mai", "Juni",
@@ -875,6 +909,8 @@ def print_week(lines: list[str], day: dt.date) -> None:
             print(l)
         print("")
 
+    if "weekly_tracker" in PLUGINS:
+        PLUGINS["weekly_tracker"].run(lines, day)
 
     iy, iw = iso_year_week(day)
 
