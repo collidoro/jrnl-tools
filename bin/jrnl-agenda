@@ -235,7 +235,6 @@ def build_day_template(day: dt.date) -> list[str]:
         "",
         "r ",
         "",
-        "",
     ]
 
 def ensure_week_file(day: dt.date) -> str:
@@ -360,7 +359,7 @@ def normalize_day_section(section: list[str]) -> list[str]:
         if len(body) >= 2 and body[-2].strip() != "":
             body.insert(-1, "")
 
-    return [heading] + body + ["", ""]
+    return [heading] + body 
 
 def fill_weather_if_blank(section: list[str]) -> list[str]:
     """If the first w line is empty (just 'w'), fill it."""
