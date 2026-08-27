@@ -25,6 +25,10 @@ install_file \
     "plugins/weekly_tracker.py" \
     "$HOME/.config/jrnl/plugins/weekly_tracker.py"
 
+install_file \
+    "plugins/week_review.py" \
+    "$HOME/.config/jrnl/plugins/week_review.py"
+
 chmod +x "$HOME/.local/bin/jrnl-agenda"
 
 echo "jrnl-tools installed."
