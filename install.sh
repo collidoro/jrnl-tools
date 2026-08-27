@@ -22,6 +22,10 @@ install_file \
     "$HOME/.local/bin/jrnl-agenda"
 
 install_file \
+    "bin/jrnl.sh" \
+    "$HOME/.local/bin/jrnl.sh"
+
+install_file \
     "plugins/weekly_tracker.py" \
     "$HOME/.config/jrnl/plugins/weekly_tracker.py"
 
