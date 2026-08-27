@@ -75,8 +75,10 @@ EDITOR = os.environ.get("JRNL_AGENDA_EDITOR", os.environ.get("EDITOR", "nvim"))
 WEATHER_CITY = os.environ.get("JRNL_WEATHER_CITY", "Zurich")
 WEATHER_LANG = os.environ.get("JRNL_WEATHER_LANG", "de")
 
-SEP_LINE = "--------------------------------------------"
-
+# SEP_LINE = "─" * 42
+DIM = "\033[38;2;77;77;77m"
+RESET = "\033[0m"
+SEP_LINE = f"{DIM}{'╌' * 42}{RESET}"
 
 # ----------------- Weather -----------------
 
@@ -165,7 +167,11 @@ def iso_year_week(day: dt.date) -> tuple[int, int]:
 
 def week_file_path(day: dt.date) -> str:
     iy, iw = iso_year_week(day)
-    return os.path.join(BASE_DIR, f"{iy}-W{iw:02d}.md")
+    return os.path.join(
+        BASE_DIR,
+        str(iy),
+        f"{iy}-W{iw:02d}.md",
+    )
 
 def monday_of_iso_week(iso_year: int, iso_week: int) -> dt.date:
     return dt.date.fromisocalendar(iso_year, iso_week, 1)
@@ -174,6 +180,13 @@ def day_heading(day: dt.date) -> str:
     wd = WEEKDAY_SHORT[day.weekday()]
     return f"#### {wd} {day.strftime('%d.%m.%y')}"
 
+def legacy_day_file_path(day: dt.date) -> str:
+    wd = WEEKDAY_SHORT[day.weekday()]
+    return os.path.join(
+        BASE_DIR,
+        str(day.year),
+        f"{day.strftime('%y-%m-%d')}-{wd}.md",
+    )
 
 # ----------------- YAML / sections -----------------
 
@@ -601,7 +614,7 @@ def normalize_week_meta(lines: list[str], day: dt.date, add_goal: str | None = N
         goals.pop(0)
 
     if add_goal:
-        goals.append(add_goal)
+        goals.extend(wrap_cli_line(add_goal, width=42))
     if add_task:
         tasks.append(f"- [ ] {add_task}")
 
@@ -895,11 +908,18 @@ def print_week(lines: list[str], day: dt.date) -> None:
         while filtered and filtered[0].strip() == "":
             filtered.pop(0)
 
-        print(f"{month_tok} {week_tok}")
+      # print(f"{month_tok} {week_tok}")
+      # print("")
+
+        title = f"{month_tok} {week_tok}"
+        print(f"\033[7m{title:<42}\033[0m")
         print("")
 
         for l in filtered:
-            print(l)
+            cli_line = re.sub(r"\*\*(.*?)\*\*", r"\1", l)
+
+            for wrapped in wrap_cli_line(cli_line, width=42):
+                print(wrapped)
 
         # genau 1 Leerzeile vor den Tagen
         if not filtered or filtered[-1].strip() != "":
@@ -950,7 +970,7 @@ def print_week(lines: list[str], day: dt.date) -> None:
                 if st in ("w", "r"):
                     continue
 
-                for wrapped in wrap_cli_line(l, width=43):
+                for wrapped in wrap_cli_line(l, width=42):
                   print(wrapped)
 
         # Abstand UNTERHALB des Tages
@@ -1005,15 +1025,11 @@ def main() -> None:
                 if m2:
                     y = int(m2.group(1))
                     w = int(m2.group(2))
+                
                 else:
-                    # Jahr-Heuristik (gewünscht):
-                    # - wenn Zielwoche <= aktuelle Woche -> aktuelles ISO-Jahr
-                    # - wenn Zielwoche >  aktuelle Woche -> Vorjahr
-                    iso_y, iso_w = iso_year_week(today)
+                    iso_y, _ = iso_year_week(today)
                     w = int(m.group(1))
                     y = iso_y
-                    if w > iso_w:
-                        y = iso_y - 1
 
                 # Montag dieser ISO-Woche als Referenzdatum
                 ref_day = dt.date.fromisocalendar(y, w, 1)
@@ -1030,7 +1046,34 @@ def main() -> None:
             rest = " ".join(args[1:]).strip()
             path = ensure_week_file(ref_day)
             lines = read_lines(path)
+        
+            if sub == "review":
+                plugin = PLUGINS.get("week_review")
 
+                if plugin is None:
+                    die("Plugin 'week_review' nicht gefunden", 1)
+
+                def add_next_week_goal(text: str) -> None:
+                    next_day = ref_day + dt.timedelta(days=7)
+
+                    next_path = ensure_week_file(next_day)
+                    next_lines = read_lines(next_path)
+
+                    next_lines = normalize_week_meta(
+                        next_lines,
+                        next_day,
+                        add_goal=text,
+                    )
+
+                    write_lines(next_path, next_lines)
+
+                plugin.run(
+                    path,
+                    ref_day,
+                    add_next_week_goal=add_next_week_goal,
+                )
+                return
+        
             if sub == "z":
                 if not rest:
                     die("Bitte Text für Wochenziel angeben (jrnl week [Wxx|YYYY-Wxx] z <Text>)", 2)
@@ -1069,10 +1112,37 @@ def main() -> None:
         try:
             sec = get_day_section(lines, day)
         except Exception:
-            die(
-                f"Kein Tages-Abschnitt für {day.strftime('%d.%m.%y')} in {os.path.basename(path)}",
-                1,
-            )
+            sec = []
+
+        meaningful = [
+            line.strip()
+            for line in sec
+            if line.strip()
+            and not line.startswith("#### ")
+            and line.strip() not in ("w", "r")
+        ]
+
+        if not meaningful:
+            legacy_path = legacy_day_file_path(day)
+
+            if os.path.exists(legacy_path):
+                legacy_lines = read_lines(legacy_path)
+
+                try:
+                    sec = get_day_section(legacy_lines, day)
+                    lines = legacy_lines
+                    path = legacy_path
+                except Exception:
+                    die(
+                        f"Kein Tages-Abschnitt für {day.strftime('%d.%m.%y')} "
+                        f"in {os.path.basename(legacy_path)}",
+                        1,
+                    )
+            else:
+                die(
+                    f"Kein Tages-Abschnitt für {day.strftime('%d.%m.%y')}",
+                    1,
+                )
 
         # YYMMDD --edit
         if args[:1] == ["--edit"]:
