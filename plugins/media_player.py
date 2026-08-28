@@ -28,8 +28,6 @@ def find_media(lines):
         for url in matches:
             label = line.strip()
 
-            # Wenn die URL alleine auf einer Zeile steht,
-            # vorherige sinnvolle Zeile als Beschreibung verwenden.
             if label == url or label == f"- {url}":
                 for previous in reversed(lines[:index]):
                     previous = previous.strip()
@@ -42,6 +40,37 @@ def find_media(lines):
     return media
 
 
+def open_media(url):
+    is_android = "PRoot-Distro" in os.uname().release
+
+    if is_android:
+        subprocess.run(["termux-open-url", url])
+        return
+
+    if shutil.which("mpv") is None:
+        print("mpv nicht gefunden.")
+        return
+
+    result = subprocess.run(
+        ["mpv", url],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    if result.returncode == 0:
+        return
+
+    print("Normaler YouTube-Client fehlgeschlagen – versuche web_safari …")
+
+    subprocess.run(
+        [
+            "mpv",
+            "--ytdl-raw-options=extractor-args=youtube:player_client=web_safari",
+            url,
+        ]
+    )
+
+
 def run(lines, reference_day=None):
     media = find_media(lines)
 
@@ -49,12 +78,8 @@ def run(lines, reference_day=None):
         print("Keine Medien-Links gefunden.")
         return
 
-    if shutil.which("mpv") is None:
-        print("mpv nicht gefunden.")
-        return
-
     if len(media) == 1:
-        os.execvp("mpv", ["mpv", media[0][1]])
+        open_media(media[0][1])
         return
 
     if shutil.which("fzf") is None:
@@ -75,7 +100,7 @@ def run(lines, reference_day=None):
         ],
         input=choices,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
     )
 
     if result.returncode != 0 or not result.stdout.strip():
@@ -84,4 +109,4 @@ def run(lines, reference_day=None):
     selected = result.stdout.strip().split("\t")
     url = selected[-1]
 
-    os.execvp("mpv", ["mpv", url])
+    open_media(url)
