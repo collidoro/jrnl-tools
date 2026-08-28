@@ -1011,6 +1011,18 @@ def main() -> None:
         print_day(lines, today)
         return
 
+    if cmd == "play":
+        plugin = PLUGINS.get("media_player")
+
+        if plugin is None:
+            die("Plugin 'media_player' nicht gefunden", 1)
+
+        path, lines = ensure_today_ready(today)
+        sec = get_day_section(lines, today)
+
+        plugin.run(sec, today)
+        return
+
     if cmd == "week":
         # Optionaler Week-Selector: W02 oder 2026-W02
         ref_day = today
@@ -1071,6 +1083,15 @@ def main() -> None:
                     ref_day,
                     add_next_week_goal=add_next_week_goal,
                 )
+                return
+
+            if sub == "play":
+                plugin = PLUGINS.get("media_player")
+
+                if plugin is None:
+                    die("Plugin 'media_player' nicht gefunden", 1)
+
+                plugin.run(lines, ref_day)
                 return
         
             if sub == "z":

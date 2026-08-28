@@ -238,6 +238,11 @@ jrnl() {
       return $?
       ;;
 
+    play)
+      "$AGENDA_BIN" play
+      return $?
+      ;;
+
     week)
       if [ "$1" = "--edit" ]; then
         "$AGENDA_BIN" week --edit

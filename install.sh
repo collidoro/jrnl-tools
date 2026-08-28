@@ -33,6 +33,10 @@ install_file \
     "plugins/week_review.py" \
     "$HOME/.config/jrnl/plugins/week_review.py"
 
+install_file \
+    "plugins/media_player.py" \
+    "$HOME/.config/jrnl/plugins/media_player.py"
+
 chmod +x "$HOME/.local/bin/jrnl-agenda"
 
 echo "jrnl-tools installed."
