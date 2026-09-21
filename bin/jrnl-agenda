@@ -1142,7 +1142,12 @@ def main() -> None:
             and line.strip() not in ("w", "r")
         ]
 
-        if not meaningful:
+          
+        writing = bool(args) and args[0] in (
+            "f", "e", "t", "-", "l", "r", "x", "--edit"
+        )
+
+        if not meaningful and not writing:
             legacy_path = legacy_day_file_path(day)
 
             if os.path.exists(legacy_path):
